@@ -1,5 +1,13 @@
 # Validation status
 
+## v0.1.1 — latest release
+
+The APK retains the newest 100 unliked records and keeps favorites separately. JVM tests: **48 passed**; lint: **0 errors, 11 warnings**. Physical S24 Ultra tests: **4 passed** — isolated history retention/migration, actual NPU generation/replay/like/reopen, history navigation, and deletion/selection state. The NPU smoke executed 4 pitch and 4 sound calls with both graphs using QNN only.
+
+The existing signing certificate was retained, and existing phone records were unchanged after the in-place update. Installed APK SHA-256: `5f80bd82ef517fa617b4e08839aedc4415c6b773a587a6f223e3a64f2fb62b4e`. The two model assets, Ferro exporter and audio DSP are unchanged. The isolated history test uses its own cache files; live-history UI fixtures require spare slots so they cannot evict user records.
+
+## v0.1.0 — original verification
+
 This summary excludes device serials, local paths, user records and screenshots. Raw reproducibility reports are generated locally under ignored `artifacts/`.
 
 | Scope | Current result |
@@ -17,7 +25,7 @@ This summary excludes device serials, local paths, user records and screenshots.
 
 The pitch model's earlier 13.28% roughness reduction refers only to its historical three-partial proxy at the documented default sampler settings. It is not a measurement of the current Saw preview. The sound model uses an approximate eight-harmonic/seven-time-point proxy; quieter or shorter notes can improve that score. Neither evaluation establishes pleasantness, creativity, power savings or an NPU speed advantage.
 
-The final APK SHA-256 is `2186b89d6880bf9140d346e58466833026a4100a486fed9cec213711881509ee`. The strict backend run and repeated six-case physical UI suite used that exact APK. The installed APK hash was checked before and after the UI run. Raw QNN execution counts include one warm-up per model: 129 pitch and 96 sound executions; 223 excludes those two warm-ups. Machine-readable scope is in [validation.json](validation.json).
+The v0.1.0 APK SHA-256 is `2186b89d6880bf9140d346e58466833026a4100a486fed9cec213711881509ee`. The strict backend run and repeated six-case physical UI suite used that exact APK. The installed APK hash was checked before and after the UI run. Raw QNN execution counts include one warm-up per model: 129 pitch and 96 sound executions; 223 excludes those two warm-ups. Machine-readable scope is in [validation.json](validation.json).
 
 ## Historical evidence
 

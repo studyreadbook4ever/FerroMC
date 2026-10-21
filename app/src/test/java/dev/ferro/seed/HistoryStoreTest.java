@@ -11,7 +11,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import static org.junit.Assert.*;
 
@@ -26,6 +28,29 @@ public class HistoryStoreTest {
     }
 
     private File file() { return new File(temporary.getRoot(), "history.json"); }
+
+    private String recentId(int number) { return String.format(Locale.ROOT, "recent-%03d", number); }
+
+    private List<NoteRecord> recentRecords(int count) {
+        List<NoteRecord> records = new ArrayList<>();
+        for (int i = 0; i < count; i++) records.add(record(recentId(i), i, false));
+        return records;
+    }
+
+    private byte[] writeHistory(File target, List<NoteRecord> records, int version) throws Exception {
+        JSONArray items = new JSONArray();
+        for (NoteRecord record : records) {
+            JSONObject item = record.toJson();
+            if (version == 1) {
+                item.remove("tones"); item.remove("decays"); item.remove("drives");
+            }
+            items.put(item);
+        }
+        byte[] bytes = new JSONObject().put("version", version).put("records", items)
+                .toString().getBytes(StandardCharsets.UTF_8);
+        Files.write(target.toPath(), bytes);
+        return bytes;
+    }
 
     @Test public void persistsExactNotesLikesAndDeletionAcrossRestarts() throws Exception {
         HistoryStore first = new HistoryStore(file());
@@ -203,5 +228,144 @@ public class HistoryStoreTest {
         assertArrayEquals(new int[]{20}, legacy.drives);
         legacy.tones[0] = 101;
         try { legacy.copy(); fail(); } catch (IllegalArgumentException expected) { }
+    }
+
+    @Test public void retainsNewestHundredAndEveryLikedRecordAcrossRestart() throws Exception {
+        HistoryStore store = new HistoryStore(file());
+        for (int i = 0; i < 105; i++) store.add(record("liked-" + i, i, true));
+        // A permutation makes insertion order disagree with creation time.
+        for (int i = 0; i < 120; i++) {
+            int number = i * 37 % 120;
+            store.add(record(recentId(number), number, false));
+        }
+        HistoryStore restarted = new HistoryStore(file());
+        assertEquals(HistoryStore.MAX_RECENT_RECORDS + 105, restarted.list().size());
+        assertEquals(100, restarted.list().stream().filter(value -> !value.liked).count());
+        for (int i = 0; i < 120; i++) {
+            if (i < 20) assertNull(restarted.get(recentId(i)));
+            else assertNotNull(restarted.get(recentId(i)));
+        }
+        for (int i = 0; i < 105; i++) {
+            NoteRecord liked = restarted.get("liked-" + i);
+            assertNotNull(liked);
+            assertTrue(liked.liked);
+            assertArrayEquals(new int[]{43, 58, 62, 78}, liked.pitches);
+            assertArrayEquals(new int[]{96, 72, 101, 83}, liked.velocities);
+            assertArrayEquals(new int[]{0, 35, 100, 61}, liked.tones);
+            assertArrayEquals(new int[]{100, 0, 80, 29}, liked.decays);
+            assertArrayEquals(new int[]{0, 100, 20, 67}, liked.drives);
+        }
+    }
+
+    @Test public void timestampTiesUseDescendingIdRatherThanInsertionOrder() throws Exception {
+        HistoryStore store = new HistoryStore(file());
+        for (int i = 0; i < 110; i++) {
+            int number = i * 37 % 110;
+            store.add(record(recentId(number), 500, false));
+        }
+        for (int i = 0; i < 110; i++) {
+            if (i < 10) assertNull(store.get(recentId(i)));
+            else assertNotNull(store.get(recentId(i)));
+        }
+        store.add(record("z-equal-time", 500, false));
+        store.add(record("a-equal-time", 500, false));
+        store.add(record("newly-added-but-old", 499, false));
+        assertEquals(100, store.list().size());
+        assertNull(store.get(recentId(10)));
+        assertNull(store.get("a-equal-time"));
+        assertNull(store.get("newly-added-but-old"));
+        assertEquals("z-equal-time", store.latest().id);
+        assertEquals("z-equal-time", new HistoryStore(file()).latest().id);
+    }
+
+    @Test public void unlikingAtCapacityReturnsOnlyAPersistedSurvivor() throws Exception {
+        List<NoteRecord> initial = recentRecords(100);
+        initial.add(record("liked-old", 0, true));
+        initial.add(record("liked-new", 200, true));
+        writeHistory(file(), initial, 2);
+        HistoryStore store = new HistoryStore(file());
+        // recent-000 wins the timestamp tie against liked-old by descending id.
+        assertNull(store.toggleLike("liked-old"));
+        assertNull(store.get("liked-old"));
+        NoteRecord retained = store.toggleLike("liked-new");
+        assertNotNull(retained);
+        assertFalse(retained.liked);
+        assertNull(store.get(recentId(0)));
+        assertEquals(100, store.list().size());
+        HistoryStore restarted = new HistoryStore(file());
+        assertEquals(100, restarted.list().size());
+        assertNull(restarted.get("liked-old"));
+        assertFalse(restarted.get("liked-new").liked);
+        assertArrayEquals(retained.tones, restarted.get("liked-new").tones);
+    }
+
+    @Test public void oversizedLegacyAndCurrentFilesTrimOnLoadAndKeepOriginalBackup() throws Exception {
+        for (int version : new int[]{1, 2}) {
+            File source = new File(temporary.getRoot(), "version-" + version + ".json");
+            List<NoteRecord> initial = recentRecords(105);
+            initial.add(record("liked-old", 0, true));
+            byte[] original = writeHistory(source, initial, version);
+            HistoryStore store = new HistoryStore(source);
+            assertEquals(101, store.list().size());
+            assertNull(store.get(recentId(4)));
+            assertNotNull(store.get(recentId(5)));
+            assertTrue(store.get("liked-old").liked);
+            assertArrayEquals(version == 1 ? new int[]{50, 50, 50, 50} : new int[]{0, 35, 100, 61},
+                    store.get("liked-old").tones);
+            assertArrayEquals(version == 1 ? new int[]{80, 80, 80, 80} : new int[]{100, 0, 80, 29},
+                    store.get("liked-old").decays);
+            assertArrayEquals(version == 1 ? new int[]{20, 20, 20, 20} : new int[]{0, 100, 20, 67},
+                    store.get("liked-old").drives);
+            File backup = new File(source.getPath() + ".bak");
+            assertArrayEquals(original, Files.readAllBytes(backup.toPath()));
+            byte[] trimmed = Files.readAllBytes(source.toPath());
+            assertEquals(2, new JSONObject(new String(trimmed, StandardCharsets.UTF_8)).getInt("version"));
+            assertEquals(101, new HistoryStore(source).list().size());
+            assertArrayEquals(trimmed, Files.readAllBytes(source.toPath()));
+            assertArrayEquals(original, Files.readAllBytes(backup.toPath()));
+        }
+    }
+
+    @Test public void oversizedRecoveredBackupIsTrimmedWithoutOverwritingGoodBackup() throws Exception {
+        List<NoteRecord> initial = recentRecords(105);
+        initial.add(record("liked-old", 0, true));
+        File backup = new File(file().getPath() + ".bak");
+        byte[] goodBackup = writeHistory(backup, initial, 2);
+        Files.write(file().toPath(), "{broken".getBytes(StandardCharsets.UTF_8));
+        HistoryStore recovered = new HistoryStore(file());
+        assertTrue(recovered.recoveredFromBackup());
+        assertEquals(101, recovered.list().size());
+        assertTrue(recovered.get("liked-old").liked);
+        assertNull(recovered.get(recentId(4)));
+        assertArrayEquals(goodBackup, Files.readAllBytes(backup.toPath()));
+        assertEquals(101, new HistoryStore(file()).list().size());
+    }
+
+    @Test public void failedCappedMutationsDoNotPruneOrUnlikePersistedRecords() throws Exception {
+        List<NoteRecord> initial = recentRecords(100);
+        initial.add(record("liked-old", 0, true));
+        byte[] original = writeHistory(file(), initial, 2);
+        HistoryStore store = new HistoryStore(file());
+        assertTrue(new File(file().getPath() + ".tmp").mkdir());
+        try { store.add(record("newest", 1000, false)); fail(); } catch (IOException expected) { }
+        try { store.toggleLike("liked-old"); fail(); } catch (IOException expected) { }
+        assertEquals(101, store.list().size());
+        assertTrue(store.get("liked-old").liked);
+        assertNotNull(store.get(recentId(0)));
+        assertNull(store.get("newest"));
+        assertArrayEquals(original, Files.readAllBytes(file().toPath()));
+        assertTrue(new HistoryStore(file()).get("liked-old").liked);
+    }
+
+    @Test public void failedLoadTrimDoesNotFallBackToAnOlderBackup() throws Exception {
+        byte[] original = writeHistory(file(), recentRecords(105), 1);
+        List<NoteRecord> oldRecords = new ArrayList<>();
+        oldRecords.add(record("stale-backup", 1, true));
+        File backup = new File(file().getPath() + ".bak");
+        byte[] previousBackup = writeHistory(backup, oldRecords, 2);
+        assertTrue(new File(file().getPath() + ".tmp").mkdir());
+        try { new HistoryStore(file()); fail(); } catch (IOException expected) { }
+        assertArrayEquals(original, Files.readAllBytes(file().toPath()));
+        assertArrayEquals(previousBackup, Files.readAllBytes(backup.toPath()));
     }
 }

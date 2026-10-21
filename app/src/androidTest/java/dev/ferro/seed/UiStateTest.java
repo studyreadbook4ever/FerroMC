@@ -41,6 +41,8 @@ public final class UiStateTest {
         Context context = instrumentation.getTargetContext();
         UiDevice device = UiDevice.getInstance(instrumentation);
         HistoryStore store = HistoryStore.shared(context);
+        assertTrue("This UI fixture needs two free recent-history slots to preserve user records.",
+                store.list().stream().filter(r -> !r.liked).count() <= HistoryStore.MAX_RECENT_RECORDS - 2);
         String prefix = "ui-state-" + UUID.randomUUID();
         String currentId = prefix + "-a";
         String remainingId = prefix + "-b";

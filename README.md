@@ -1,13 +1,17 @@
+**[FerroMC v0.1.1 APK 다운로드](https://github.com/studyreadbook4ever/FerroMC/releases/latest/download/FerroMC.apk)**
+
 # FerroMC
 
 Galaxy S24 Ultra에서 NPU로 짧은 음 조합을 탐색하는 Android 앱입니다. 음정과 함께 각 음의 **TONE·DECAY·DRIVE·VELOCITY**를 생성하고, 마음에 드는 결과를 [Ferro](https://github.com/studyreadbook4ever/Ferro)에서 이어 편집할 수 있습니다.
 
-**현재 검증:** 두 모델의 학습·수치 검증, JVM 테스트 41개, 실제 Ferro의 음별 속성 로드·렌더·편집·재저장 검사를 통과했습니다. 실물 S24 Ultra에서 두 모델의 엄격한 HTP 실행과 UI·저장·오디오 6개 검사를 통과했고, Java 미리듣기는 두 고정 예제에서 실제 Ferro DSP와 샘플 단위로 일치했습니다. APK별 검증 범위와 한계는 [검증 상태](research/validation.md)를 참고하세요.
+다운로드 APK는 **ARM64 Galaxy S24 Ultra용 디버그 빌드**입니다. v0.1.1은 기존 설치본과 같은 개발용 키로 서명해 앱을 삭제하지 않고 업데이트할 수 있습니다. APK 파일명은 `FerroMC.apk`입니다.
+
+**v0.1.1 검증:** JVM 테스트 48개, 실물 S24 Ultra의 저장 한도·NPU 생성·기록 화면 테스트 4개를 통과했습니다. 기존 기록을 유지한 업데이트와 배포 APK의 설치 해시도 확인했습니다. 모델·Ferro 호환성과 이전 버전의 상세 검증은 [검증 상태](research/validation.md)에 기록했습니다.
 
 ## 사용
 
 1. **음 생성**을 눌러 2~4개 음을 만들고 **재생**으로 다시 듣습니다.
-2. **과거 생성기록 보기**에서 듣기·좋아요·삭제를 할 수 있습니다. 좋아요는 위에 모이고 처음에는 최근 일반 기록이 보입니다.
+2. **과거 생성기록 보기**에서 듣기·좋아요·삭제를 할 수 있습니다. 좋아요는 위에 모이고 처음에는 최근 일반 기록이 보입니다. **좋아요를 누르지 않은 기록은 최근 100개까지** 보관하며, 초과하면 가장 오래된 기록부터 자동 삭제합니다. 좋아요 기록은 별도로 보관해 이 제한으로 삭제하지 않습니다.
 3. 좋아요를 누른 결과의 **.ferro 내보내기**를 선택합니다. 저장한 파일은 사용자가 직접 PC로 옮깁니다.
 4. Ferro에서 음정·velocity와 음별 tone·decay·drive를 편집합니다.
 
@@ -36,4 +40,4 @@ python3 tools/setup_qnn_runtime.py
 
 APK는 `app/build/outputs/apk/debug/app-debug.apk`에 생성됩니다. [재현 절차](research/reproduction.md)에 학습·실물 기기·Ferro 검증 명령이 있고, [NPU 통합 설명](research/npu-integration.md)에 런타임 조건을 기록했습니다.
 
-프로젝트의 원본 코드와 직접 학습한 모델 가중치는 [Unlicense](LICENSE)로 제공합니다. ONNX Runtime, Qualcomm QNN 및 빌드·테스트 의존성은 각각의 라이선스가 적용됩니다. [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)를 확인하세요. 이 저장소에는 Qualcomm SDK 바이너리나 빌드된 APK를 포함하지 않습니다.
+프로젝트의 원본 코드와 직접 학습한 모델 가중치는 [Unlicense](LICENSE)로 제공합니다. ONNX Runtime, Qualcomm QNN 및 빌드·테스트 의존성은 각각의 라이선스가 적용됩니다. [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)를 확인하세요. Qualcomm SDK 바이너리와 빌드된 APK는 소스 Git 추적에서 제외하며, APK는 [GitHub Releases](https://github.com/studyreadbook4ever/FerroMC/releases/latest)로 배포합니다. 배포 APK에는 사용하는 런타임의 라이선스와 고지를 함께 포함합니다.

@@ -42,6 +42,8 @@ public final class UiFlowTest {
         context = instrumentation.getTargetContext();
         device = UiDevice.getInstance(instrumentation);
         store = HistoryStore.shared(context);
+        assertTrue("This UI fixture needs one free recent-history slot to preserve user records.",
+                store.list().stream().filter(r -> !r.liked).count() < HistoryStore.MAX_RECENT_RECORDS);
         File external = context.getExternalFilesDir(null);
         assertNotNull("The app needs its external files directory for UI evidence.", external);
         screenshots = new File(external, "ui-test-screenshots");

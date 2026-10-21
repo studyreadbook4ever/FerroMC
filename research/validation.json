@@ -71,5 +71,36 @@
     "Roughness proxies do not establish pleasantness or creativity.",
     "No NPU-versus-CPU speed or energy advantage is claimed.",
     "AudioTrack progress does not establish physical speaker audibility."
-  ]
+  ],
+  "baseline_version": "0.1.0",
+  "current_release": {
+    "version": "0.1.1",
+    "version_code": 2,
+    "apk_sha256": "5f80bd82ef517fa617b4e08839aedc4415c6b773a587a6f223e3a64f2fb62b4e",
+    "device_cases_passed": 4,
+    "test_classes": [
+      "dev.ferro.seed.HistoryRetentionTest",
+      "dev.ferro.seed.NpuUiSmokeTest",
+      "dev.ferro.seed.UiFlowTest",
+      "dev.ferro.seed.UiStateTest"
+    ],
+    "existing_records_preserved": true,
+    "recent_cap": 100,
+    "liked_exempt": true,
+    "pitch_calls": 4,
+    "sound_calls": 4,
+    "both_graphs_qnn_only": true,
+    "unit_tests": {
+      "tests": 48,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "lint_errors": 0,
+    "lint_warnings": 11,
+    "same_signing_certificate": true,
+    "build_type": "debug",
+    "models_unchanged": true,
+    "scope": "v0.1.1 exact installed APK; isolated cache history boundary test plus real NPU and UI smoke. Earlier full DSP/export/bulk HTP checks above belong to v0.1.0."
+  }
 }
