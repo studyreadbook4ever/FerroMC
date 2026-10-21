@@ -1,0 +1,215 @@
+package dev.ferro.seed;
+
+import android.content.Context;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+/** Synchronous transactional persistence. Call mutations from the app's serial background executor. */
+public final class HistoryStore {
+    private static HistoryStore sharedInstance;
+    private static final long MAX_BYTES = 32L * 1024 * 1024;
+    private static final Comparator<NoteRecord> HISTORY_ORDER = (a, b) -> {
+        if (a.liked != b.liked) return a.liked ? -1 : 1;
+        int time = Long.compare(b.createdAt, a.createdAt);
+        return time != 0 ? time : b.id.compareTo(a.id);
+    };
+
+    private final File file;
+    private final File backup;
+    private List<NoteRecord> records;
+    private boolean mainFileValid;
+    private boolean recoveredFromBackup;
+
+    /** Reuse one store across Activity recreation while an old generation task finishes saving. */
+    public static synchronized HistoryStore shared(Context context) throws IOException {
+        if (sharedInstance == null) sharedInstance = new HistoryStore(context);
+        return sharedInstance;
+    }
+
+    public HistoryStore(Context context) throws IOException {
+        this(new File(context.getFilesDir(), "generated-history.json"));
+    }
+
+    /** File-based constructor also supports recovery and persistence tests without an Android device. */
+    public HistoryStore(File file) throws IOException {
+        this.file = file.getAbsoluteFile();
+        this.backup = new File(this.file.getPath() + ".bak");
+        File parent = this.file.getParentFile();
+        if (!parent.isDirectory() && !parent.mkdirs()) {
+            throw new IOException("Cannot create the history directory.");
+        }
+        if (!this.file.exists() && !backup.exists()) {
+            records = new ArrayList<>();
+            return;
+        }
+        IOException original;
+        try {
+            records = read(this.file);
+            mainFileValid = true;
+            return;
+        } catch (IOException error) {
+            original = error;
+        }
+        try {
+            records = read(backup);
+            recoveredFromBackup = true;
+        } catch (IOException error) {
+            original.addSuppressed(error);
+            throw new IOException("History could not be read; its files were preserved.", original);
+        }
+    }
+
+    public synchronized List<NoteRecord> list() {
+        return copies(records);
+    }
+
+    public synchronized List<NoteRecord> sortedHistory() {
+        List<NoteRecord> result = copies(records);
+        result.sort(HISTORY_ORDER);
+        return result;
+    }
+
+    public static int newestUnlikedIndex(List<NoteRecord> sortedHistory) {
+        for (int i = 0; i < sortedHistory.size(); i++) {
+            if (!sortedHistory.get(i).liked) return i;
+        }
+        return -1;
+    }
+
+    public synchronized NoteRecord get(String id) {
+        for (NoteRecord record : records) {
+            if (record.id.equals(id)) return record.copy();
+        }
+        return null;
+    }
+
+    public synchronized NoteRecord latest() {
+        NoteRecord newest = null;
+        for (NoteRecord record : records) {
+            if (newest == null || record.createdAt >= newest.createdAt) newest = record;
+        }
+        return newest == null ? null : newest.copy();
+    }
+
+    public synchronized boolean recoveredFromBackup() {
+        return recoveredFromBackup;
+    }
+
+    public synchronized void add(NoteRecord record) throws IOException {
+        NoteRecord safe = record.copy();
+        for (NoteRecord existing : records) {
+            if (existing.id.equals(safe.id)) throw new IllegalArgumentException("Duplicate record id.");
+        }
+        List<NoteRecord> changed = copies(records);
+        changed.add(safe);
+        commit(changed);
+    }
+
+    public synchronized NoteRecord toggleLike(String id) throws IOException {
+        List<NoteRecord> changed = copies(records);
+        for (int i = 0; i < changed.size(); i++) {
+            NoteRecord current = changed.get(i);
+            if (current.id.equals(id)) {
+                NoteRecord updated = current.withLiked(!current.liked);
+                changed.set(i, updated);
+                commit(changed);
+                return updated.copy();
+            }
+        }
+        return null;
+    }
+
+    public synchronized boolean delete(String id) throws IOException {
+        List<NoteRecord> changed = copies(records);
+        boolean removed = changed.removeIf(record -> record.id.equals(id));
+        if (removed) commit(changed);
+        return removed;
+    }
+
+    private static List<NoteRecord> copies(List<NoteRecord> source) {
+        List<NoteRecord> result = new ArrayList<>(source.size());
+        for (NoteRecord record : source) result.add(record.copy());
+        return result;
+    }
+
+    private static List<NoteRecord> read(File source) throws IOException {
+        if (!source.isFile() || source.length() > MAX_BYTES) {
+            throw new IOException("Missing or oversized history file: " + source.getName());
+        }
+        try {
+            JSONObject root = new JSONObject(new String(Files.readAllBytes(source.toPath()),
+                    StandardCharsets.UTF_8));
+            Object version = root.get("version");
+            if (!(version instanceof Integer) || (((Integer) version) != 1 && ((Integer) version) != 2)) {
+                throw new JSONException("Unsupported history version.");
+            }
+            JSONArray items = root.getJSONArray("records");
+            List<NoteRecord> result = new ArrayList<>(items.length());
+            Set<String> ids = new HashSet<>();
+            for (int i = 0; i < items.length(); i++) {
+                NoteRecord record = NoteRecord.fromJson(items.getJSONObject(i));
+                if (!ids.add(record.id)) throw new JSONException("Duplicate history id.");
+                result.add(record);
+            }
+            return result;
+        } catch (JSONException | IllegalArgumentException error) {
+            throw new IOException("Invalid history data: " + source.getName(), error);
+        }
+    }
+
+    private void commit(List<NoteRecord> changed) throws IOException {
+        byte[] contents;
+        try {
+            JSONArray items = new JSONArray();
+            for (NoteRecord record : changed) items.put(record.toJson());
+            contents = new JSONObject().put("version", 2).put("records", items)
+                    .toString().getBytes(StandardCharsets.UTF_8);
+        } catch (JSONException error) {
+            throw new IOException("Cannot encode history.", error);
+        }
+        if (contents.length > MAX_BYTES) throw new IOException("History storage limit reached.");
+        File temporary = new File(file.getPath() + ".tmp");
+        writeSynced(temporary, contents);
+        if (mainFileValid) {
+            File backupTemporary = new File(backup.getPath() + ".tmp");
+            writeSynced(backupTemporary, Files.readAllBytes(file.toPath()));
+            replace(backupTemporary, backup);
+        }
+        replace(temporary, file);
+        // Publish in-memory state only after the durable file has been replaced successfully.
+        records = changed;
+        mainFileValid = true;
+    }
+
+    private static void writeSynced(File target, byte[] bytes) throws IOException {
+        try (FileOutputStream output = new FileOutputStream(target)) {
+            output.write(bytes);
+            output.getFD().sync();
+        }
+    }
+
+    private static void replace(File source, File target) throws IOException {
+        try {
+            Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException error) {
+            // The complete previous version remains in .bak if this filesystem lacks atomic moves.
+            Files.move(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+}

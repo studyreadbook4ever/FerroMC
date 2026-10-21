@@ -1,0 +1,57 @@
+{
+  "name": "FerroMC scratch pitch MLP",
+  "version": 1,
+  "parameter_count": 82432,
+  "architecture": [
+    256,
+    128,
+    128,
+    256
+  ],
+  "activations": [
+    "ReLU",
+    "ReLU",
+    "linear"
+  ],
+  "input_name": "chord_context",
+  "output_name": "pitch_logits",
+  "input_shape": [
+    16,
+    256
+  ],
+  "output_shape": [
+    16,
+    256
+  ],
+  "input_dtype": "float32",
+  "output_dtype": "float32",
+  "voices": 4,
+  "pitch_min_midi": 36,
+  "pitch_count": 64,
+  "mask_encoding": "one 64-value voice block all zero; other blocks one-hot",
+  "sampling": "start with 4 distinct random pitches; mask/sample voices 0,1,2,3; exclude existing visible pitches",
+  "training_reference_partials": [
+    1.0,
+    0.25,
+    0.1
+  ],
+  "acoustic_mix": 0.35,
+  "acoustic_strength": 2.0,
+  "roughness_normalization": 0.028566359551376964,
+  "training_seed": 20261021,
+  "training_contexts": 65536,
+  "validation_contexts": 8192,
+  "data_split": "deterministic hash of sorted visible three-note set: train buckets0..7, validation8, independent test9; no context-set leakage",
+  "training_candidate_count": 3997696,
+  "training_objective": "masked categorical soft-label cross entropy over synthetic uniformly proposed chords, weakly weighted by acoustic roughness",
+  "no_pretrained_weights": true,
+  "no_tonal_theory": true,
+  "no_phone_training": true,
+  "quantization": "static QDQ uint8 activations / uint8 weights; float32 graph I/O",
+  "sha256": "a2efd7250f487374d427dfc118c3f7c97b174d202b083eff93b9b14879d01256",
+  "file_bytes": 88811,
+  "quality_checks_passed": true,
+  "python_version": "3.12.13",
+  "torch_version": "2.14.1+cpu",
+  "generated_at_unix": 1792544220
+}

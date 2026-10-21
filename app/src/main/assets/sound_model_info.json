@@ -1,0 +1,104 @@
+{
+  "model_version": "scratch-sound-v1",
+  "parameter_count": 10432,
+  "combined_parameter_count": 92864,
+  "architecture": [
+    32,
+    64,
+    64,
+    64
+  ],
+  "input_name": "sound_context",
+  "input_shape": [
+    16,
+    32
+  ],
+  "output_name": "sound_logits",
+  "output_shape": [
+    16,
+    64
+  ],
+  "dtype": "float32",
+  "internal_quantization": "QDQ uint8 activations and weights",
+  "parameter_order": [
+    "tone",
+    "decay",
+    "drive",
+    "velocity"
+  ],
+  "bin_low": [
+    [
+      0,
+      25,
+      50,
+      75
+    ],
+    [
+      0,
+      25,
+      50,
+      75
+    ],
+    [
+      0,
+      25,
+      50,
+      75
+    ],
+    [
+      16,
+      44,
+      72,
+      100
+    ]
+  ],
+  "bin_high": [
+    [
+      24,
+      49,
+      74,
+      100
+    ],
+    [
+      24,
+      49,
+      74,
+      100
+    ],
+    [
+      24,
+      49,
+      74,
+      100
+    ],
+    [
+      43,
+      71,
+      99,
+      127
+    ]
+  ],
+  "input_voice_slots": [
+    "(pitch-36)/63",
+    "presence",
+    "tone/100",
+    "decay/100",
+    "drive/100",
+    "velocity/127",
+    "missing",
+    "reserved_zero"
+  ],
+  "mask_contract": "Keep active pitch/presence; zero four parameters and set missing=1. Inactive voices are all zero.",
+  "guidance": {
+    "uniform_fraction": 0.65,
+    "roughness_fraction": 0.35,
+    "strength": 2.0
+  },
+  "limitations": [
+    "Synthetic approximate spectral roughness only; not pleasantness or exact Ferro DSP.",
+    "The level-sensitive proxy can improve by lowering velocity or shortening decay; this is not evidence of harmonic consonance.",
+    "No pretrained weights, music corpus, tonal rules, or phone training.",
+    "Pitch model retains its original three-partial proxy; only this new model uses the Ferro Saw approximation."
+  ],
+  "sha256": "39480004f30a579712b3d8318ec8f163e74bef827f12218c5a95d8a72ee4aa4a"
+}

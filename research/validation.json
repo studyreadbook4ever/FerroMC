@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "project": "FerroMC",
+  "date": "2026-10-21",
+  "scope": "Sanitized verification summary; raw device records, serials and screenshots are excluded.",
+  "models": {
+    "pitch": {
+      "parameters": 82432,
+      "sha256": "a2efd7250f487374d427dfc118c3f7c97b174d202b083eff93b9b14879d01256"
+    },
+    "sound": {
+      "parameters": 10432,
+      "sha256": "39480004f30a579712b3d8318ec8f163e74bef827f12218c5a95d8a72ee4aa4a"
+    },
+    "combined_parameters": 92864
+  },
+  "host": {
+    "jvm_tests_passed": 41,
+    "lint_errors": 0,
+    "lint_warnings": 11,
+    "domain_export_tests_passed": 14
+  },
+  "physical_htp": {
+    "status": "passed",
+    "device_family": "Samsung Galaxy S24 Ultra / Snapdragon 8 Gen 3 / HTP V75",
+    "apk_sha256": "2186b89d6880bf9140d346e58466833026a4100a486fed9cec213711881509ee",
+    "test_apk_sha256": "c542282c3fd11feab3f9c5ec3302238d928d91943254a7e652045c8cf232afcd",
+    "generated_results": 32,
+    "model_calls_excluding_warmup": 223,
+    "raw_pitch_executions_including_warmup": 129,
+    "raw_sound_executions_including_warmup": 96,
+    "non_qnn_graph_node_events": 0,
+    "cpu_graph_fallback_enabled": false,
+    "cpu_graph_io_offload_enabled": false
+  },
+  "physical_ui": {
+    "status": "passed",
+    "test_cases": 6,
+    "tests": [
+      "NpuUiSmokeTest",
+      "UiFlowTest",
+      "UiStateTest",
+      "UiExportTest",
+      "AudioPlaybackTest (2 cases)"
+    ],
+    "apk_scope": "Exact final APK; installed base.apk SHA-256 checked before and after all six cases.",
+    "existing_user_records_preserved": true,
+    "actual_saf_export_verified": true,
+    "apk_sha256": "2186b89d6880bf9140d346e58466833026a4100a486fed9cec213711881509ee",
+    "installed_apk_hash_verified_before_and_after": true
+  },
+  "ferro": {
+    "reference_commit": "ea8a1451ebca207e15cb25361a6a053f9712ac48",
+    "reference_sources_unmodified": true,
+    "pitch_velocity_per_note_sound_load_render_edit_save_reload": "passed",
+    "physical_saf_document": "passed",
+    "actual_npu_generated_liked_saf_document": "passed: generated in app, liked, saved through Android document picker, compared against the stored NoteRecord and loaded/rendered/edited/saved/reloaded in upstream Ferro"
+  },
+  "preview_reference_comparison": {
+    "status": "passed",
+    "fixtures": 2,
+    "frames_per_fixture": 144000,
+    "sample_rate": 48000,
+    "master": 0.7,
+    "channels_compared": 2,
+    "maximum_absolute_error": 0.0,
+    "rms_error": 0.0,
+    "scope": "Host production Java float renderer vs unmodified Ferro C++ renderer; not phone output or speaker audibility."
+  },
+  "limitations": [
+    "Roughness proxies do not establish pleasantness or creativity.",
+    "No NPU-versus-CPU speed or energy advantage is claimed.",
+    "AudioTrack progress does not establish physical speaker audibility."
+  ]
+}
