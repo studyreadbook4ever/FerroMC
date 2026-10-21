@@ -1,6 +1,18 @@
 # Validation status
 
-## v0.1.1 — latest release
+## v0.1.2 — latest release
+
+The home button runs 100 generate/save cycles with three replays per saved result and a Stop control. Likes capture the record visible at touch-down, persist on a separate queue from NPU inference, and remain responsive while that inference queue is held. Home controls retain their View identity. History reads use immutable published snapshots without waiting for disk writes, and successful writes update a recreated Activity.
+
+**69 JVM tests passed**, including 16 virtual-time repeat-controller tests covering 100 generations / 300 replay requests, exact delays, slow audio, cancellation, failures and stale callbacks. Storage tests also cover writer-lock independence and successful-only change notifications. Lint: **0 errors, 11 existing warnings**.
+
+The exact release APK passed **8 emulator cases**: pressed-note/rapid likes, late saves across Activity recreation and background playback cancellation (2), history retention, history navigation, deletion/selection, actual SAF export, and AudioTrack progress/stop (2). The installed emulator APK hash matches the release artifact. These tests used real failed HTP initialization, not a mocked successful NPU or a forced ready flag. The first emulator run exposed an ORT native initialization crash under ARM translation; native-ABI preflight now rejects that unsupported environment before loading the runtime, and all eight cases passed after the fix.
+
+**Physical S24 Ultra and a real HTP 100-cycle run were not executed for v0.1.2**; the user requested publication without waiting for phone verification. The models, QNN libraries, sampling, audio DSP and Ferro exporter are unchanged. Native ARM64 continues through the existing strict HTP checks with CPU graph fallback and graph I/O offload disabled. Earlier physical evidence below does not establish this release's complete device behavior.
+
+APK SHA-256: `2fa3a00fe7c13b0228bb7c9645c67cc840ad43f154cd71317a9f43385e4c317b`. The previous signing certificate is retained; this is a debug APK, version code 3. Raw evidence stays in ignored `artifacts/v0.1.2/` and the machine-readable release scope is in [validation.json](validation.json).
+
+## v0.1.1 — previous release
 
 The APK retains the newest 100 unliked records and keeps favorites separately. JVM tests: **48 passed**; lint: **0 errors, 11 warnings**. Physical S24 Ultra tests: **4 passed** — isolated history retention/migration, actual NPU generation/replay/like/reopen, history navigation, and deletion/selection state. The NPU smoke executed 4 pitch and 4 sound calls with both graphs using QNN only.
 

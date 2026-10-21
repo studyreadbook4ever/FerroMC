@@ -73,6 +73,9 @@ public final class NpuEngine implements AutoCloseable {
         diagnostics.remove("error");
         final long started = System.nanoTime();
         try {
+            // ARM translation can crash inside ORT's native initializer before Java can catch it.
+            // Reject it explicitly; it cannot provide this application's Qualcomm HTP backend.
+            requireNativeArm64(Build.SUPPORTED_ABIS);
             File libraryDir = new File(context.getApplicationInfo().nativeLibraryDir);
             for (String name : new String[]{"libQnnHtp.so", "libQnnSystem.so",
                     "libQnnHtpPrepare.so", "libQnnHtpV75Stub.so", "libQnnHtpV75Skel.so"}) {
@@ -148,6 +151,13 @@ public final class NpuEngine implements AutoCloseable {
         } catch (Exception | LinkageError error) {
             fail(error);
             throw new IllegalStateException(state, error);
+        }
+    }
+
+    static void requireNativeArm64(String[] supportedAbis) throws IOException {
+        if (supportedAbis == null || supportedAbis.length == 0
+                || !"arm64-v8a".equals(supportedAbis[0])) {
+            throw new IOException("네이티브 ARM64 Qualcomm HTP 기기가 필요합니다. ARM 변환 환경에서는 음 생성을 지원하지 않습니다.");
         }
     }
 

@@ -52,6 +52,7 @@ public final class UiStateTest {
         AtomicReference<Throwable> gateFailure = new AtomicReference<>();
         Activity activity = null;
         ExecutorService worker = null;
+        ExecutorService historyWorker = null;
         Throwable primaryFailure = null;
 
         try {
@@ -75,10 +76,11 @@ public final class UiStateTest {
             await(device, By.text(ChordSampler.describe(a.pitches)));
             assertEquals(currentId, current(instrumentation, activity).id);
             worker = fieldOnMain(instrumentation, activity, "worker", ExecutorService.class);
+            historyWorker = fieldOnMain(instrumentation, activity, "historyWorker", ExecutorService.class);
 
-            // The actual NPU initialization already queued by onCreate is allowed to finish.
-            // Only the serial background queue is gated; the main/UI thread stays responsive.
-            worker.execute(() -> {
+            // Gate the actual storage queue independently of NPU initialization.
+            // The main/UI thread and inference queue stay responsive.
+            historyWorker.execute(() -> {
                 gateEntered.countDown();
                 try {
                     releaseGate.await();
@@ -87,7 +89,7 @@ public final class UiStateTest {
                     gateFailure.set(interrupted);
                 }
             });
-            assertTrue("Initialization must complete and the storage queue gate must start.",
+            assertTrue("The storage queue gate must start.",
                     gateEntered.await(WORKER_TIMEOUT, TimeUnit.MILLISECONDS));
             instrumentation.waitForIdleSync();
 
@@ -114,7 +116,7 @@ public final class UiStateTest {
             // This marker is after deletion in the same FIFO queue. Waiting for it
             // ensures the deletion's UI callback was posted before we drain UI work.
             CountDownLatch deletionTaskFinished = new CountDownLatch(1);
-            worker.execute(deletionTaskFinished::countDown);
+            historyWorker.execute(deletionTaskFinished::countDown);
             releaseGate.countDown();
             assertTrue("The queued deletion task must finish after its gate is released.",
                     deletionTaskFinished.await(WORKER_TIMEOUT, TimeUnit.MILLISECONDS));
@@ -155,6 +157,14 @@ public final class UiStateTest {
                 try {
                     assertTrue("The Activity's worker must drain before removing test fixtures.",
                             worker.awaitTermination(WORKER_TIMEOUT, TimeUnit.MILLISECONDS));
+                } catch (Throwable failure) {
+                    cleanupFailures.add(failure);
+                }
+            }
+            if (historyWorker != null) {
+                try {
+                    assertTrue("The Activity's history queue must drain before fixture cleanup.",
+                            historyWorker.awaitTermination(WORKER_TIMEOUT, TimeUnit.MILLISECONDS));
                 } catch (Throwable failure) {
                     cleanupFailures.add(failure);
                 }

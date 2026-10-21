@@ -14,6 +14,12 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.*;
 
@@ -113,6 +119,120 @@ public class HistoryStoreTest {
         assertEquals(100, store.get("result").decays[0]);
         assertEquals(0, store.get("result").drives[0]);
         assertEquals(1, store.list().size());
+    }
+
+    @Test public void previouslyReturnedSnapshotsRemainStableAcrossLaterCommits() throws Exception {
+        HistoryStore store = new HistoryStore(file());
+        store.add(record("older", 10, false));
+        store.add(record("newer", 20, false));
+        List<NoteRecord> before = store.list();
+        List<NoteRecord> sortedBefore = store.sortedHistory();
+        NoteRecord olderBefore = store.get("older");
+        NoteRecord latestBefore = store.latest();
+
+        store.toggleLike("older");
+        store.delete("newer");
+        store.add(record("newest", 30, false));
+        assertEquals(2, before.size());
+        assertFalse(before.get(0).liked);
+        assertEquals("newer", before.get(1).id);
+        assertEquals("newer", sortedBefore.get(0).id);
+        assertFalse(olderBefore.liked);
+        assertEquals("newer", latestBefore.id);
+        assertTrue(store.get("older").liked);
+        assertNull(store.get("newer"));
+        assertEquals("newest", store.latest().id);
+
+        before.get(0).tones[0] = 99;
+        sortedBefore.get(1).velocities[0] = 1;
+        olderBefore.decays[0] = 0;
+        latestBefore.drives[0] = 99;
+        before.clear();
+        assertEquals(0, store.get("older").tones[0]);
+        assertEquals(96, store.get("older").velocities[0]);
+        assertEquals(100, store.get("older").decays[0]);
+        assertEquals(0, store.latest().drives[0]);
+        assertEquals(2, new HistoryStore(file()).list().size());
+    }
+
+    @Test public void listenersObserveOnlySuccessfulCommitsAndCanBeRemoved() throws Exception {
+        HistoryStore store = new HistoryStore(file());
+        AtomicInteger notifications = new AtomicInteger();
+        Runnable listener = notifications::incrementAndGet;
+        store.addChangeListener(listener);
+        store.addChangeListener(listener);
+        assertEquals("Registration must not invent a commit", 0, notifications.get());
+        store.add(record("saved", 10, false));
+        assertEquals("Duplicate registration is one observer", 1, notifications.get());
+        assertTrue(store.toggleLike("saved").liked);
+        assertEquals(2, notifications.get());
+        assertFalse(store.delete("missing"));
+        assertNull(store.toggleLike("missing"));
+        assertThrows(IllegalArgumentException.class, () -> store.add(record("saved", 20, false)));
+        assertEquals(2, notifications.get());
+
+        File blockedTemporary = new File(file().getPath() + ".tmp");
+        assertTrue(blockedTemporary.mkdir());
+        assertThrows(IOException.class, () -> store.toggleLike("saved"));
+        assertEquals("Failed writes must not notify", 2, notifications.get());
+        assertTrue(store.get("saved").liked);
+        assertTrue(new HistoryStore(file()).get("saved").liked);
+        assertTrue(blockedTemporary.delete());
+
+        store.removeChangeListener(listener);
+        store.removeChangeListener(listener);
+        assertTrue(store.delete("saved"));
+        assertEquals("Removed observers must not receive later commits", 2, notifications.get());
+        assertNull(new HistoryStore(file()).get("saved"));
+    }
+
+    @Test public void failingListenerCannotUndoCommitOrSuppressOtherListeners() throws Exception {
+        HistoryStore store = new HistoryStore(file());
+        AtomicInteger notifications = new AtomicInteger();
+        Runnable broken = () -> { throw new IllegalStateException("intentional observer failure"); };
+        store.addChangeListener(broken);
+        store.addChangeListener(notifications::incrementAndGet);
+        store.add(record("saved", 10, false));
+        assertEquals(1, notifications.get());
+        assertNotNull(store.get("saved"));
+        assertNotNull(new HistoryStore(file()).get("saved"));
+        store.removeChangeListener(broken);
+    }
+
+    @Test public void snapshotReadsDoNotWaitForTheWriterMonitor() throws Exception {
+        HistoryStore store = new HistoryStore(file());
+        store.add(record("saved", 10, false));
+        CountDownLatch writerEntered = new CountDownLatch(1);
+        CountDownLatch releaseWriter = new CountDownLatch(1);
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        Future<?> writer = threads.submit(() -> {
+            // Deterministic stand-in for a writer held up by disk fsync while owning this monitor.
+            synchronized (store) {
+                writerEntered.countDown();
+                assertTrue(releaseWriter.await(15, TimeUnit.SECONDS));
+                store.toggleLike("saved");
+            }
+            return null;
+        });
+        try {
+            assertTrue(writerEntered.await(5, TimeUnit.SECONDS));
+            Future<?> reader = threads.submit(() -> {
+                assertFalse(store.get("saved").liked);
+                assertEquals("saved", store.latest().id);
+                assertEquals(1, store.list().size());
+                assertFalse(store.sortedHistory().get(0).liked);
+                assertNull(store.get("missing"));
+            });
+            // Releasing the writer before this completes would hide the original blocking bug.
+            reader.get(3, TimeUnit.SECONDS);
+            assertEquals(1, releaseWriter.getCount());
+        } finally {
+            releaseWriter.countDown();
+            try { writer.get(10, TimeUnit.SECONDS); }
+            finally { threads.shutdownNow(); }
+        }
+        assertTrue(store.get("saved").liked);
+        assertTrue(new HistoryStore(file()).get("saved").liked);
     }
 
     @Test public void failedWriteDoesNotPublishUnpersistedResult() throws Exception {

@@ -161,6 +161,7 @@ public final class NpuUiSmokeTest {
                 return saved != null && saved.liked;
             });
             drainQueuedWork(first.worker);
+            drainQueuedWork(first.historyWorker);
             instrumentation.waitForIdleSync();
             assertTrue(await(device, By.desc("현재 음 좋아요")).getText().contains("♥"));
             NoteRecord liked = store.get(result.id);
@@ -203,6 +204,7 @@ public final class NpuUiSmokeTest {
                 try {
                     if (!first.closed) {
                         drainQueuedWork(first.worker);
+                        drainQueuedWork(first.historyWorker);
                         instrumentation.waitForIdleSync();
                     }
                     NoteRecord selected = field(instrumentation, first.activity, "current", NoteRecord.class);
@@ -328,14 +330,20 @@ public final class NpuUiSmokeTest {
     private static final class Launch {
         final Activity activity;
         final ExecutorService worker;
+        final ExecutorService historyWorker;
         boolean closed;
-        Launch(Activity activity, ExecutorService worker) { this.activity = activity; this.worker = worker; }
+        Launch(Activity activity, ExecutorService worker, ExecutorService historyWorker) {
+            this.activity = activity;
+            this.worker = worker;
+            this.historyWorker = historyWorker;
+        }
     }
 
     private static Launch launch(Instrumentation instrumentation, Context context) {
         Activity activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
-        return new Launch(activity, field(instrumentation, activity, "worker", ExecutorService.class));
+        return new Launch(activity, field(instrumentation, activity, "worker", ExecutorService.class),
+                field(instrumentation, activity, "historyWorker", ExecutorService.class));
     }
 
     private static void drainQueuedWork(ExecutorService worker) throws Exception {
@@ -352,6 +360,8 @@ public final class NpuUiSmokeTest {
         instrumentation.waitForIdleSync();
         assertTrue("The finished Activity must close its worker and NPU session.",
                 launch.worker.awaitTermination(STARTUP_TIMEOUT, TimeUnit.MILLISECONDS));
+        assertTrue("The finished Activity must finish its storage actions.",
+                launch.historyWorker.awaitTermination(STARTUP_TIMEOUT, TimeUnit.MILLISECONDS));
         launch.closed = true;
     }
 

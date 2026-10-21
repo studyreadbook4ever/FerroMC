@@ -14,16 +14,22 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /** Synchronous transactional persistence. Call mutations from the app's serial background executor. */
 public final class HistoryStore {
     public static final int MAX_RECENT_RECORDS = 100;
     private static HistoryStore sharedInstance;
     private static final long MAX_BYTES = 32L * 1024 * 1024;
+    private static final Logger LOGGER = Logger.getLogger(HistoryStore.class.getName());
     private static final Comparator<NoteRecord> RECENCY_ORDER = (a, b) -> {
         int time = Long.compare(b.createdAt, a.createdAt);
         return time != 0 ? time : b.id.compareTo(a.id);
@@ -35,7 +41,10 @@ public final class HistoryStore {
 
     private final File file;
     private final File backup;
-    private List<NoteRecord> records;
+    // Published lists and their records are never mutated. Read methods copy one snapshot
+    // without acquiring the writer's monitor, including while disk fsync is in progress.
+    private volatile List<NoteRecord> records = Collections.emptyList();
+    private final Set<Runnable> changeListeners = new CopyOnWriteArraySet<>();
     private boolean mainFileValid;
     private boolean recoveredFromBackup;
 
@@ -58,15 +67,14 @@ public final class HistoryStore {
             throw new IOException("Cannot create the history directory.");
         }
         if (!this.file.exists() && !backup.exists()) {
-            records = new ArrayList<>();
             return;
         }
         try {
-            records = read(this.file);
+            records = Collections.unmodifiableList(read(this.file));
             mainFileValid = true;
         } catch (IOException original) {
             try {
-                records = read(backup);
+                records = Collections.unmodifiableList(read(backup));
                 recoveredFromBackup = true;
             } catch (IOException error) {
                 original.addSuppressed(error);
@@ -78,12 +86,14 @@ public final class HistoryStore {
         if (retained.size() != records.size()) commit(retained);
     }
 
-    public synchronized List<NoteRecord> list() {
-        return copies(records);
+    public List<NoteRecord> list() {
+        List<NoteRecord> snapshot = records;
+        return copies(snapshot);
     }
 
-    public synchronized List<NoteRecord> sortedHistory() {
-        List<NoteRecord> result = copies(records);
+    public List<NoteRecord> sortedHistory() {
+        List<NoteRecord> snapshot = records;
+        List<NoteRecord> result = copies(snapshot);
         result.sort(HISTORY_ORDER);
         return result;
     }
@@ -95,16 +105,18 @@ public final class HistoryStore {
         return -1;
     }
 
-    public synchronized NoteRecord get(String id) {
-        for (NoteRecord record : records) {
+    public NoteRecord get(String id) {
+        List<NoteRecord> snapshot = records;
+        for (NoteRecord record : snapshot) {
             if (record.id.equals(id)) return record.copy();
         }
         return null;
     }
 
-    public synchronized NoteRecord latest() {
+    public NoteRecord latest() {
+        List<NoteRecord> snapshot = records;
         NoteRecord newest = null;
-        for (NoteRecord record : records) {
+        for (NoteRecord record : snapshot) {
             if (newest == null || RECENCY_ORDER.compare(record, newest) < 0) newest = record;
         }
         return newest == null ? null : newest.copy();
@@ -112,6 +124,20 @@ public final class HistoryStore {
 
     public synchronized boolean recoveredFromBackup() {
         return recoveredFromBackup;
+    }
+
+    /**
+     * Observe successful commits. Called on the committing thread after publication, while
+     * its writer lock is held: listeners must only enqueue work, never block or mutate this
+     * store. Registering does not replay a change; register before reading the initial snapshot.
+     */
+    public void addChangeListener(Runnable listener) {
+        changeListeners.add(Objects.requireNonNull(listener, "listener"));
+    }
+
+    /** Already-enqueued callbacks may still run; an Activity must also guard its destroyed state. */
+    public void removeChangeListener(Runnable listener) {
+        changeListeners.remove(listener);
     }
 
     public synchronized void add(NoteRecord record) throws IOException {
@@ -192,7 +218,7 @@ public final class HistoryStore {
     }
 
     private void commit(List<NoteRecord> changed) throws IOException {
-        List<NoteRecord> retained = retainRecent(changed);
+        List<NoteRecord> retained = Collections.unmodifiableList(new ArrayList<>(retainRecent(changed)));
         byte[] contents;
         try {
             JSONArray items = new JSONArray();
@@ -214,6 +240,15 @@ public final class HistoryStore {
         // Publish in-memory state only after the durable file has been replaced successfully.
         records = retained;
         mainFileValid = true;
+        for (Runnable listener : changeListeners) {
+            try {
+                listener.run();
+            } catch (RuntimeException error) {
+                // A notification failure cannot turn an already durable commit into a failed write
+                // or prevent the remaining Activities from receiving the change.
+                LOGGER.log(Level.WARNING, "History change listener failed", error);
+            }
+        }
     }
 
     private static void writeSynced(File target, byte[] bytes) throws IOException {
