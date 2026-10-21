@@ -21,12 +21,16 @@ import java.util.Set;
 
 /** Synchronous transactional persistence. Call mutations from the app's serial background executor. */
 public final class HistoryStore {
+    public static final int MAX_RECENT_RECORDS = 100;
     private static HistoryStore sharedInstance;
     private static final long MAX_BYTES = 32L * 1024 * 1024;
-    private static final Comparator<NoteRecord> HISTORY_ORDER = (a, b) -> {
-        if (a.liked != b.liked) return a.liked ? -1 : 1;
+    private static final Comparator<NoteRecord> RECENCY_ORDER = (a, b) -> {
         int time = Long.compare(b.createdAt, a.createdAt);
         return time != 0 ? time : b.id.compareTo(a.id);
+    };
+    private static final Comparator<NoteRecord> HISTORY_ORDER = (a, b) -> {
+        if (a.liked != b.liked) return a.liked ? -1 : 1;
+        return RECENCY_ORDER.compare(a, b);
     };
 
     private final File file;
@@ -57,21 +61,21 @@ public final class HistoryStore {
             records = new ArrayList<>();
             return;
         }
-        IOException original;
         try {
             records = read(this.file);
             mainFileValid = true;
-            return;
-        } catch (IOException error) {
-            original = error;
+        } catch (IOException original) {
+            try {
+                records = read(backup);
+                recoveredFromBackup = true;
+            } catch (IOException error) {
+                original.addSuppressed(error);
+                throw new IOException("History could not be read; its files were preserved.", original);
+            }
         }
-        try {
-            records = read(backup);
-            recoveredFromBackup = true;
-        } catch (IOException error) {
-            original.addSuppressed(error);
-            throw new IOException("History could not be read; its files were preserved.", original);
-        }
+        // A failed trim is a write error, not a reason to replace valid current data with a backup.
+        List<NoteRecord> retained = retainRecent(records);
+        if (retained.size() != records.size()) commit(retained);
     }
 
     public synchronized List<NoteRecord> list() {
@@ -101,7 +105,7 @@ public final class HistoryStore {
     public synchronized NoteRecord latest() {
         NoteRecord newest = null;
         for (NoteRecord record : records) {
-            if (newest == null || record.createdAt >= newest.createdAt) newest = record;
+            if (newest == null || RECENCY_ORDER.compare(record, newest) < 0) newest = record;
         }
         return newest == null ? null : newest.copy();
     }
@@ -120,6 +124,7 @@ public final class HistoryStore {
         commit(changed);
     }
 
+    /** Returns null if absent, or if unliking an old record removes it from the recent 100. */
     public synchronized NoteRecord toggleLike(String id) throws IOException {
         List<NoteRecord> changed = copies(records);
         for (int i = 0; i < changed.size(); i++) {
@@ -128,7 +133,7 @@ public final class HistoryStore {
                 NoteRecord updated = current.withLiked(!current.liked);
                 changed.set(i, updated);
                 commit(changed);
-                return updated.copy();
+                return get(id);
             }
         }
         return null;
@@ -145,6 +150,20 @@ public final class HistoryStore {
         List<NoteRecord> result = new ArrayList<>(source.size());
         for (NoteRecord record : source) result.add(record.copy());
         return result;
+    }
+
+    private static List<NoteRecord> retainRecent(List<NoteRecord> source) {
+        List<NoteRecord> recent = new ArrayList<>();
+        for (NoteRecord record : source) if (!record.liked) recent.add(record);
+        if (recent.size() <= MAX_RECENT_RECORDS) return source;
+        recent.sort(RECENCY_ORDER);
+        Set<String> retainedIds = new HashSet<>(MAX_RECENT_RECORDS);
+        for (int i = 0; i < MAX_RECENT_RECORDS; i++) retainedIds.add(recent.get(i).id);
+        List<NoteRecord> retained = new ArrayList<>(source.size() - recent.size() + MAX_RECENT_RECORDS);
+        for (NoteRecord record : source) {
+            if (record.liked || retainedIds.contains(record.id)) retained.add(record);
+        }
+        return retained;
     }
 
     private static List<NoteRecord> read(File source) throws IOException {
@@ -173,10 +192,11 @@ public final class HistoryStore {
     }
 
     private void commit(List<NoteRecord> changed) throws IOException {
+        List<NoteRecord> retained = retainRecent(changed);
         byte[] contents;
         try {
             JSONArray items = new JSONArray();
-            for (NoteRecord record : changed) items.put(record.toJson());
+            for (NoteRecord record : retained) items.put(record.toJson());
             contents = new JSONObject().put("version", 2).put("records", items)
                     .toString().getBytes(StandardCharsets.UTF_8);
         } catch (JSONException error) {
@@ -192,7 +212,7 @@ public final class HistoryStore {
         }
         replace(temporary, file);
         // Publish in-memory state only after the durable file has been replaced successfully.
-        records = changed;
+        records = retained;
         mainFileValid = true;
     }
 

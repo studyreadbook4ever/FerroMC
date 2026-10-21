@@ -138,7 +138,8 @@ public final class MainActivity extends Activity {
                         (android.os.SystemClock.elapsedRealtime()-started)+" notes="+Arrays.toString(notes));
                 runOnUiThread(()->{
                     if(destroyed)return;
-                    if(selectionVersion==selectionAtStart){current=result;selectionVersion++;}
+                    if(selectionVersion==selectionAtStart){current=store.get(result.id);selectionVersion++;}
+                    refreshCurrentAfterHistoryChange();
                     generating=false;
                     if(page.equals("home"))showHome();
                     else if(page.equals("history"))showHistory(null);
@@ -175,11 +176,19 @@ public final class MainActivity extends Activity {
                 NoteRecord updated=store.toggleLike(record.id);
                 runOnUiThread(()->{
                     if(destroyed)return;
-                    if(current!=null && current.id.equals(record.id))current=updated;
+                    refreshCurrentAfterHistoryChange();
+                    if(updated==null)toast("최근 100개보다 오래된 기록을 정리했어요.");
                     if(page.equals("history"))showHistory(record.id);else showPage();
                 });
             }catch(Exception e){runOnUiThread(()->showError("좋아요를 저장하지 못했어요",e));}
         });
+    }
+
+    private void refreshCurrentAfterHistoryChange(){
+        if(current==null){current=store.latest();return;}
+        NoteRecord saved=store.get(current.id);
+        if(saved==null){stopPlayback();current=store.latest();selectionVersion++;}
+        else current=saved;
     }
 
     private void delete(NoteRecord record){
@@ -287,7 +296,7 @@ public final class MainActivity extends Activity {
         base("history");header("생성 기록");
         List<NoteRecord> records=store.sortedHistory();
         long liked=records.stream().filter(r->r.liked).count();
-        TextView intro=text("좋아요는 위에, 최근 기록은 아래에 표시됩니다.",12,MUTED,false);intro.setPadding(0,dp(8),0,dp(16));root.addView(intro);
+        TextView intro=text("좋아요는 따로 보관하고, 최근 생성은 100개까지 저장합니다.",12,MUTED,false);intro.setPadding(0,dp(8),0,dp(16));root.addView(intro);
         LinearLayout links=row();Button likedLink=smallButton("♥ 좋아요 "+liked);Button recentLink=smallButton("최근 생성 "+(records.size()-liked));
         links.addView(likedLink,new LinearLayout.LayoutParams(0,dp(44),1));links.addView(recentLink,new LinearLayout.LayoutParams(0,dp(44),1));root.addView(links);
         ScrollView scroll=new ScrollView(this);scroll.setVerticalScrollBarEnabled(false);scroll.setContentDescription("생성 기록 목록");
@@ -295,7 +304,7 @@ public final class MainActivity extends Activity {
         TextView likedHeader=section("좋아요",liked==0?"좋아요를 누른 음이 없습니다.":"다시 듣거나 .ferro 파일로 저장할 수 있습니다.");list.addView(likedHeader);
         HashMap<String,View> cards=new HashMap<>();
         for(NoteRecord record:records)if(record.liked){View card=recordCard(record);cards.put(record.id,card);list.addView(card,cardSpacing());}
-        TextView recentHeader=section("최근 생성","최신 기록부터 표시합니다.");recentHeader.setContentDescription("최근 생성 시작");list.addView(recentHeader);
+        TextView recentHeader=section("최근 생성","최신 100개를 보관하며, 오래된 기록은 자동 삭제됩니다.");recentHeader.setContentDescription("최근 생성 시작");list.addView(recentHeader);
         for(NoteRecord record:records)if(!record.liked){View card=recordCard(record);cards.put(record.id,card);list.addView(card,cardSpacing());}
         if(records.size()==liked){
             TextView empty=text(records.isEmpty()?"생성 기록이 없습니다.":"좋아요 이외의 기록이 없습니다.",16,MUTED,false);

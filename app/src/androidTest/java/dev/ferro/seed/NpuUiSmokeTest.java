@@ -96,6 +96,8 @@ public final class NpuUiSmokeTest {
 
             // Preserve records that appeared while startup was in progress as well.
             for (NoteRecord record : store.list()) protectedIds.add(record.id);
+            assertTrue("This UI smoke needs one free recent-history slot to preserve user records.",
+                    store.list().stream().filter(r -> !r.liked).count() < HistoryStore.MAX_RECENT_RECORDS);
             clickedAtEpoch = System.currentTimeMillis();
             generationClicked = true;
             long generationStarted = SystemClock.elapsedRealtime();
