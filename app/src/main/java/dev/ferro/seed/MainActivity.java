@@ -8,9 +8,13 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -31,24 +35,45 @@ import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 public final class MainActivity extends Activity {
     private static final int BG=0xFF181818, PANEL=0xFF242424, BORDER=0xFF606060,
             TEXT=0xFFF5F5F5, MUTED=0xFFB8B8B8, ACCENT=0xFFEEEEEE, DARK=0xFF181818;
     private static final int EXPORT_REQUEST=41;
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
+    // Disk writes and like taps never wait behind HTP inference. Only worker owns the engine.
+    private final ExecutorService historyWorker=Executors.newSingleThreadExecutor();
+    private final Handler mainHandler=new Handler(Looper.getMainLooper());
+    private final AtomicLong generationToken=new AtomicLong();
     private final SecureRandom random=new SecureRandom();
     private final TonePlayer player=new TonePlayer();
     private HistoryStore store;
     private NpuEngine engine;
     private SharedPreferences preferences;
     private NoteRecord current, pendingExport;
-    private boolean generating, ready, initializing, destroyed, playing;
+    private boolean generating, ready, initializing, playing, generationIsRepeat;
+    private volatile boolean destroyed;
     private String engineMessage="생성기를 준비하고 있어요.", modelVersion="unknown-model";
     private String page="home";
     private long playbackToken;
     private long selectionVersion;
     private LinearLayout root;
+    private RepeatSession repeatSession;
+    private LinearLayout homeRoot, homeActions, homeSound;
+    private Button homeRepeatButton, homeGenerateButton, homeReplayButton, homeLikeButton, homeExportButton;
+    private TextView homeTitle, homeCaption, homeSubtitle, homeProgress;
+    private NoteRecord homeRecord, pressedLikeRecord;
+    private String displayedSoundId;
+    private final HashMap<String,Integer> pendingLikes=new HashMap<>();
+    private final HashMap<String,Boolean> optimisticLikes=new HashMap<>();
+    private final Runnable historyChanged=()->mainHandler.post(()->{
+        if(destroyed || store==null)return;
+        refreshCurrentAfterHistoryChange();
+        if(page.equals("home"))showHome();
+        else if(page.equals("history"))showHistory(null);
+    });
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -75,6 +100,28 @@ public final class MainActivity extends Activity {
             modelVersion="pitch-"+pitchInfo.optString("model_version",pitchInfo.optString("version","1"))
                     +"/"+soundInfo.getString("model_version");
         } catch(Exception error) { android.util.Log.e("FerroMC", "Model metadata unavailable", error); }
+        repeatSession=new RepeatSession((delay,action)->{
+            mainHandler.postDelayed(action,delay);
+            return ()->mainHandler.removeCallbacks(action);
+        },new RepeatSession.Listener(){
+            @Override public void generate(RepeatSession.Generation request){submitGeneration(request);}
+            @Override public void play(NoteRecord record,Runnable finished,Consumer<Exception> failed){
+                playAutomatic(record,finished,failed);
+            }
+            @Override public void stopPlayback(){MainActivity.this.stopPlayback();}
+            @Override public void changed(){
+                if(!repeatSession.isRunning() && generationIsRepeat){
+                    generationToken.incrementAndGet();generating=false;generationIsRepeat=false;
+                }
+                if(repeatSession.isRunning())getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if(!destroyed && page.equals("home"))showHome();
+            }
+            @Override public void failed(Exception error){showError("반복 재생을 멈췄어요",error);}
+        });
+        store.addChangeListener(historyChanged);
+        // Close the read/register gap if an old Activity completed a like during recreation.
+        refreshCurrentAfterHistoryChange();
         showPage();
         initializeEngine();
         if(store.recoveredFromBackup())toast("이전 백업에서 생성 기록을 복구했어요.");
@@ -94,6 +141,7 @@ public final class MainActivity extends Activity {
         initializing=true;ready=false;engineMessage="생성기를 준비하고 있어요.";
         if(!page.equals("history"))showPage();
         worker.execute(()->{
+            if(destroyed)return;
             try {
                 if(engine!=null)engine.close();
                 engine=new NpuEngine(getApplicationContext());
@@ -115,73 +163,151 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private boolean repeating(){return repeatSession!=null && repeatSession.isRunning();}
+
+    private void toggleRepeat(){
+        if(repeating()){repeatSession.stop();return;}
+        if(ready && !generating && !destroyed){stopPlayback();repeatSession.start();}
+    }
+
+    private void stopRepeat(){if(repeatSession!=null)repeatSession.stop();}
+
     private void generate(){
-        if(generating)return;
-        if(!ready){page="settings";showPage();return;}
-        stopPlayback();generating=true;showHome();
+        if(generating || repeating())return;
+        if(!ready){showSettings();return;}
+        submitGeneration(null);
+    }
+
+    private boolean acceptsGeneration(long token,RepeatSession.Generation request){
+        return !destroyed && generationToken.get()==token && (request==null || request.isActive());
+    }
+
+    private void submitGeneration(RepeatSession.Generation request){
+        if(destroyed || (request!=null && !request.isActive()))return;
+        if(!ready){
+            if(request!=null)request.failed(new IllegalStateException("NPU 생성기가 준비되지 않았어요."));
+            return;
+        }
+        stopPlayback();generating=true;generationIsRepeat=request!=null;
+        final long token=generationToken.incrementAndGet();
         final long selectionAtStart=selectionVersion;
-        long seed=random.nextLong();
-        int count=preferences.getInt("count",4);
-        double exploration=preferences.getInt("exploration",55)/100.0;
-        int range=preferences.getInt("range",1);
-        int low=range==1?48:36, high=range==0?71:range==1?83:99;
+        final long seed=random.nextLong();
+        final int count=preferences.getInt("count",4);
+        final double exploration=preferences.getInt("exploration",55)/100.0;
+        final int range=preferences.getInt("range",1);
+        final int low=range==1?48:36, high=range==0?71:range==1?83:99;
+        if(page.equals("home"))showHome();
         worker.execute(()->{
+            if(!acceptsGeneration(token,request))return;
             try{
                 long started=android.os.SystemClock.elapsedRealtime();
-                int[] notes=ChordSampler.generate(engine::infer,seed,count,exploration,low,high);
-                SoundSampler.Result sound=SoundSampler.generate(engine::inferSound,
-                        seed^0x464552524F4D4353L,notes,exploration);
+                int[] notes=ChordSampler.generate(input->{
+                    if(!acceptsGeneration(token,request))throw new java.util.concurrent.CancellationException();
+                    return engine.infer(input);
+                },seed,count,exploration,low,high);
+                if(!acceptsGeneration(token,request))return;
+                SoundSampler.Result sound=SoundSampler.generate(input->{
+                    if(!acceptsGeneration(token,request))throw new java.util.concurrent.CancellationException();
+                    return engine.inferSound(input);
+                },seed^0x464552524F4D4353L,notes,exploration);
+                if(!acceptsGeneration(token,request))return;
                 NoteRecord result=new NoteRecord(UUID.randomUUID().toString(),System.currentTimeMillis(),
                         notes,sound.velocities,sound.tones,sound.decays,sound.drives,false,seed,modelVersion);
-                store.add(result);
-                android.util.Log.i("SoriGeneration","saved="+result.id+" backend=QNN_HTP elapsedMs="+
-                        (android.os.SystemClock.elapsedRealtime()-started)+" notes="+Arrays.toString(notes));
-                runOnUiThread(()->{
-                    if(destroyed)return;
-                    if(selectionVersion==selectionAtStart){current=store.get(result.id);selectionVersion++;}
-                    refreshCurrentAfterHistoryChange();
-                    generating=false;
-                    if(page.equals("home"))showHome();
-                    else if(page.equals("history"))showHistory(null);
+                // Generated records and all like/delete writes share one ordered storage queue.
+                historyWorker.execute(()->{
+                    if(!acceptsGeneration(token,request))return;
+                    try{
+                        // A durable write already begun may finish after Stop; its UI/audio result
+                        // is still rejected below. Never block the main thread on a disk-write lock.
+                        store.add(result);
+                        NoteRecord saved=store.get(result.id);
+                        if(saved==null)throw new java.io.IOException("생성한 음을 기록에서 찾지 못했어요.");
+                        android.util.Log.i("SoriGeneration","saved="+result.id+" backend=QNN_HTP elapsedMs="+
+                                (android.os.SystemClock.elapsedRealtime()-started)+" notes="+Arrays.toString(notes));
+                        runOnUiThread(()->{
+                            if(!acceptsGeneration(token,request))return;
+                            generating=false;generationIsRepeat=false;
+                            if(request!=null || selectionVersion==selectionAtStart){current=saved;selectionVersion++;}
+                            refreshCurrentAfterHistoryChange();
+                            if(page.equals("home"))showHome();
+                            else if(page.equals("history"))showHistory(null);
+                            if(request!=null)request.succeeded(saved);
+                        });
+                    }catch(Exception failure){generationFailed(token,request,failure);}
                 });
-            }catch(Exception failure){
-                android.util.Log.e("SoriGeneration","Generation failed; no substitute output",failure);
-                runOnUiThread(()->{
-                    if(destroyed)return;
-                    generating=false;ready=engine!=null&&engine.initialized();engineMessage=failure.getMessage();
-                    showPage();
-                    new AlertDialog.Builder(this).setTitle("음을 생성하지 못했어요")
-                            .setMessage("NPU 실행과 저장 상태를 확인해 주세요. 기존 생성 기록은 그대로 있어요.\n\n"+failure.getMessage())
-                            .setPositiveButton("확인",null).show();
-                });
-            }
+            }catch(Exception failure){generationFailed(token,request,failure);}
+        });
+    }
+
+    private void generationFailed(long token,RepeatSession.Generation request,Exception failure){
+        if(!acceptsGeneration(token,request))return;
+        android.util.Log.e("SoriGeneration","Generation failed; no substitute output",failure);
+        runOnUiThread(()->{
+            if(!acceptsGeneration(token,request))return;
+            generating=false;generationIsRepeat=false;
+            engineMessage=failure.getMessage();
+            if(request!=null)request.failed(failure);
+            else {showPage();showError("음을 생성하지 못했어요",failure);}
         });
     }
 
     private void play(NoteRecord record){
-        if(record==null)return;
-        current=record;selectionVersion++;playing=true;long token=++playbackToken;
+        if(record==null || destroyed)return;
+        stopRepeat();
+        current=record;selectionVersion++;
+        playAutomatic(record,()->{},error->toast("재생하지 못했어요: "+error.getMessage()));
+    }
+
+    private void playAutomatic(NoteRecord record,Runnable finished,Consumer<Exception> failed){
+        if(destroyed)return;
+        playing=true;long token=++playbackToken;
         if(page.equals("home"))showHome();
         player.play(record,preferences.getInt("volume",45)/100.0,()->runOnUiThread(()->{
-                    if(destroyed || token!=playbackToken)return;
-                    playing=false;if(page.equals("home"))showHome();
-                }),error->runOnUiThread(()->{if(!destroyed && token==playbackToken)toast("재생하지 못했어요: "+error);}));
+            if(destroyed || token!=playbackToken)return;
+            playing=false;if(page.equals("home"))showHome();
+            finished.run();
+        }),error->runOnUiThread(()->{
+            if(destroyed || token!=playbackToken)return;
+            // TonePlayer reports finished in finally, even after a failure or cancellation.
+            playbackToken++;playing=false;
+            if(page.equals("home"))showHome();
+            failed.accept(new IllegalStateException(error));
+        }));
     }
 
     private void stopPlayback(){player.stop();playing=false;playbackToken++;}
 
     private void like(NoteRecord record){
-        worker.execute(()->{
+        if(record==null || destroyed)return;
+        final String id=record.id;
+        NoteRecord latest=store.get(id);
+        boolean liked=optimisticLikes.getOrDefault(id,latest!=null?latest.liked:record.liked);
+        optimisticLikes.put(id,!liked);
+        pendingLikes.put(id,pendingLikes.getOrDefault(id,0)+1);
+        if(page.equals("home"))showHome();
+        historyWorker.execute(()->{
             try{
-                NoteRecord updated=store.toggleLike(record.id);
+                NoteRecord updated=store.toggleLike(id);
                 runOnUiThread(()->{
                     if(destroyed)return;
+                    finishLike(id);
                     refreshCurrentAfterHistoryChange();
                     if(updated==null)toast("최근 100개보다 오래된 기록을 정리했어요.");
-                    if(page.equals("history"))showHistory(record.id);else showPage();
+                    if(page.equals("history"))showHistory(id);else if(page.equals("home"))showHome();
                 });
-            }catch(Exception e){runOnUiThread(()->showError("좋아요를 저장하지 못했어요",e));}
+            }catch(Exception error){runOnUiThread(()->{
+                if(destroyed)return;
+                finishLike(id);refreshCurrentAfterHistoryChange();
+                if(page.equals("home"))showHome();
+                showError("좋아요를 저장하지 못했어요",error);
+            });}
         });
+    }
+
+    private void finishLike(String id){
+        int left=pendingLikes.getOrDefault(id,1)-1;
+        if(left<=0){pendingLikes.remove(id);optimisticLikes.remove(id);}
+        else pendingLikes.put(id,left);
     }
 
     private void refreshCurrentAfterHistoryChange(){
@@ -195,7 +321,7 @@ public final class MainActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("이 소리를 삭제할까요?")
                 .setMessage(ChordSampler.describe(record.pitches)+"\n생성 기록과 좋아요 목록에서 삭제돼요.")
                 .setNegativeButton("취소",null).setPositiveButton("삭제",(d,w)->{
-                    worker.execute(()->{
+                    historyWorker.execute(()->{
                         try{
                             store.delete(record.id);
                             runOnUiThread(()->{
@@ -213,6 +339,7 @@ public final class MainActivity extends Activity {
 
     private void export(NoteRecord record){
         if(record==null || !record.liked){toast("좋아요를 누른 소리를 내보낼 수 있어요.");return;}
+        stopRepeat();stopPlayback();
         pendingExport=record.copy();
         Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
                 .setType("application/octet-stream")
@@ -227,7 +354,7 @@ public final class MainActivity extends Activity {
         NoteRecord record=pendingExport;pendingExport=null;
         if(result!=RESULT_OK || data==null || data.getData()==null || record==null)return;
         android.net.Uri destination=data.getData();
-        worker.execute(()->{
+        historyWorker.execute(()->{
             try{
                 try(OutputStream output=getContentResolver().openOutputStream(destination,"wt")){
                     if(output==null)throw new java.io.IOException("파일을 열 수 없습니다.");
@@ -242,6 +369,7 @@ public final class MainActivity extends Activity {
     private void showPage(){if(destroyed || store==null)return;switch(page){case "history":showHistory(null);break;case "settings":showSettings();break;default:showHome();}}
 
     private LinearLayout base(String name){
+        if(!name.equals("home"))stopRepeat();
         page=name;
         root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(BG);
         root.setPadding(dp(24),dp(14),dp(24),dp(18));
@@ -253,44 +381,96 @@ public final class MainActivity extends Activity {
     }
 
     private void showHome(){
-        base("home");
+        if(destroyed)return;
+        if(page.equals("home") && homeRoot==root && homeLikeButton!=null){bindHome();return;}
+        base("home");homeRoot=root;displayedSoundId=null;pressedLikeRecord=null;
         LinearLayout top=row();top.setGravity(Gravity.CENTER_VERTICAL);
         TextView word=text("FerroMC",28,TEXT,true);word.setGravity(Gravity.CENTER_VERTICAL);
         top.addView(word,new LinearLayout.LayoutParams(0,dp(52),1));
-        TextView status=text(ready?"준비 완료":initializing?"준비 중":"준비 필요",12,MUTED,false);
-        status.setGravity(Gravity.CENTER);status.setPadding(dp(12),0,0,0);
-        status.setOnClickListener(v->{page="settings";showPage();});status.setContentDescription("생성기 상태");top.addView(status,new LinearLayout.LayoutParams(-2,dp(48)));
+        homeRepeatButton=button("100회 재생",false,14);
+        homeRepeatButton.setOnClickListener(v->toggleRepeat());
+        top.addView(homeRepeatButton,new LinearLayout.LayoutParams(dp(112),dp(48)));
         root.addView(top);
         View topRule=new View(this);topRule.setBackgroundColor(BORDER);root.addView(topRule,new LinearLayout.LayoutParams(-1,dp(1)));
 
         ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);scroll.setVerticalScrollBarEnabled(false);
         LinearLayout body=column();body.setGravity(Gravity.CENTER);body.setPadding(0,dp(28),0,dp(28));
-        TextView caption=text("현재 음",13,MUTED,true);caption.setGravity(Gravity.CENTER);body.addView(caption);
-        TextView title=text(generating?"생성 중…":current==null?"생성한 음 없음":ChordSampler.describe(current.pitches),24,TEXT,true);
-        title.setPadding(0,dp(12),0,0);
-        title.setGravity(Gravity.CENTER);body.addView(title);
-        TextView subtitle=text(current==null?"음을 생성하면 여기에 표시됩니다.":date(current.createdAt),12,MUTED,false);
-        subtitle.setGravity(Gravity.CENTER);LinearLayout.LayoutParams subtitleSize=new LinearLayout.LayoutParams(-1,-2);subtitleSize.topMargin=dp(9);body.addView(subtitle,subtitleSize);
+        homeProgress=text("",13,ACCENT,true);homeProgress.setGravity(Gravity.CENTER);
+        homeProgress.setContentDescription("반복 진행");homeProgress.setPadding(0,0,0,dp(14));body.addView(homeProgress);
+        homeCaption=text("현재 음",13,MUTED,true);homeCaption.setGravity(Gravity.CENTER);body.addView(homeCaption);
+        homeTitle=text("",24,TEXT,true);homeTitle.setPadding(0,dp(12),0,0);
+        homeTitle.setGravity(Gravity.CENTER);body.addView(homeTitle);
+        homeSubtitle=text("",12,MUTED,false);homeSubtitle.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams subtitleSize=new LinearLayout.LayoutParams(-1,-2);subtitleSize.topMargin=dp(9);body.addView(homeSubtitle,subtitleSize);
 
-        Button generate=button(generating?"생성 중…":"음 생성",true,27);
-        generate.setContentDescription("음 생성");generate.setEnabled(!generating && ready);generate.setAlpha(generate.isEnabled()?1f:.48f);
-        generate.setOnClickListener(v->generate());LinearLayout.LayoutParams generateSize=new LinearLayout.LayoutParams(-1,dp(84));generateSize.topMargin=dp(30);body.addView(generate,generateSize);
-        Button replay=button(playing?"재생 멈추기":"재생",false,27);replay.setContentDescription(playing?"재생 멈추기":"재생");replay.setEnabled(current!=null);replay.setAlpha(current==null?.4f:1f);
-        replay.setOnClickListener(v->{if(playing){stopPlayback();showHome();}else play(current);});LinearLayout.LayoutParams replaySize=new LinearLayout.LayoutParams(-1,dp(84));replaySize.topMargin=dp(12);body.addView(replay,replaySize);
+        homeGenerateButton=button("음 생성",true,27);homeGenerateButton.setContentDescription("음 생성");
+        homeGenerateButton.setOnClickListener(v->generate());
+        LinearLayout.LayoutParams generateSize=new LinearLayout.LayoutParams(-1,dp(84));generateSize.topMargin=dp(30);body.addView(homeGenerateButton,generateSize);
+        homeReplayButton=button("재생",false,27);
+        homeReplayButton.setOnClickListener(v->{if(playing){stopPlayback();showHome();}else play(homeRecord);});
+        LinearLayout.LayoutParams replaySize=new LinearLayout.LayoutParams(-1,dp(84));replaySize.topMargin=dp(12);body.addView(homeReplayButton,replaySize);
 
-        if(current!=null){
-            LinearLayout actions=row();Button heart=smallButton(current.liked?"♥  좋아요":"♡  좋아요");heart.setContentDescription("현재 음 좋아요");heart.setTextColor(current.liked?ACCENT:MUTED);heart.setOnClickListener(v->like(current));
-            actions.addView(heart,new LinearLayout.LayoutParams(0,dp(46),1));
-            if(current.liked){Button save=smallButton(".ferro 내보내기");save.setOnClickListener(v->export(current));actions.addView(save,new LinearLayout.LayoutParams(0,dp(46),1));}
-            body.addView(actions);
-            body.addView(soundTable(current));
-        }
+        homeActions=row();homeLikeButton=smallButton("♡  좋아요");homeLikeButton.setContentDescription("현재 음 좋아요");
+        rememberLikeTouch();
+        homeLikeButton.setOnClickListener(v->{
+            NoteRecord pressed=pressedLikeRecord!=null?pressedLikeRecord:homeRecord;
+            pressedLikeRecord=null;like(pressed);
+        });
+        homeActions.addView(homeLikeButton,new LinearLayout.LayoutParams(0,dp(46),1));
+        homeExportButton=smallButton(".ferro 내보내기");
+        homeExportButton.setOnClickListener(v->export(homeRecord));
+        homeActions.addView(homeExportButton,new LinearLayout.LayoutParams(0,dp(46),1));body.addView(homeActions);
+        homeSound=column();body.addView(homeSound);
         scroll.addView(body);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         View bottomRule=new View(this);bottomRule.setBackgroundColor(BORDER);root.addView(bottomRule,new LinearLayout.LayoutParams(-1,dp(1)));
-        LinearLayout nav=row();Button settings=smallButton("설정");settings.setContentDescription("설정");settings.setOnClickListener(v->{page="settings";showPage();});
+        LinearLayout nav=row();Button settings=smallButton("설정");settings.setContentDescription("설정");settings.setOnClickListener(v->showSettings());
         Button history=smallButton("과거 생성기록 보기");history.setContentDescription("과거 생성기록 보기");history.setOnClickListener(v->showHistory(null));
         nav.addView(settings,new LinearLayout.LayoutParams(0,dp(52),1));nav.addView(history,new LinearLayout.LayoutParams(0,dp(52),2));root.addView(nav);
+        bindHome();
     }
+
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private void rememberLikeTouch(){
+        // Observe DOWN only: returning false keeps Button's native click/accessibility behavior.
+        homeLikeButton.setOnTouchListener((v,event)->{
+            if(event.getActionMasked()==MotionEvent.ACTION_DOWN)pressedLikeRecord=homeRecord==null?null:homeRecord.copy();
+            else if(event.getActionMasked()==MotionEvent.ACTION_CANCEL)pressedLikeRecord=null;
+            return false;
+        });
+    }
+
+    private void bindHome(){
+        // Preserve Views and in-flight touch gestures through generation/audio/like callbacks.
+        boolean running=repeating(), hasRecord=current!=null;
+        homeRecord=hasRecord?current.copy():null;
+        homeRepeatButton.setText(running?"중단":"100회 재생");
+        homeRepeatButton.setContentDescription(running?"반복 중단":"100회 재생");
+        enabled(homeRepeatButton,running || (ready && !generating));
+        String progress="";
+        if(running){
+            progress=repeatSession.cycle()+"/100 · "+(generating || repeatSession.phase()==RepeatSession.Phase.GENERATING
+                    ?"음 생성 중":repeatSession.playNumber()+"/3 재생"+(playing?" 중":" · 대기"));
+        }else if(!ready)progress=initializing?"생성기 준비 중":"설정에서 생성기 상태를 확인해 주세요.";
+        homeProgress.setText(progress);homeProgress.setVisibility(progress.isEmpty()?View.GONE:View.VISIBLE);
+        homeCaption.setText(generating?"현재 음 · 다음 음 생성 중":"현재 음");
+        homeGenerateButton.setText(generating?"생성 중…":"음 생성");enabled(homeGenerateButton,!generating && ready && !running);
+        homeReplayButton.setText(playing?"재생 멈추기":"재생");
+        homeReplayButton.setContentDescription(playing?"재생 멈추기":"재생");enabled(homeReplayButton,hasRecord && !running);
+        homeActions.setVisibility(hasRecord?View.VISIBLE:View.GONE);enabled(homeLikeButton,hasRecord);
+        boolean liked=hasRecord && optimisticLikes.getOrDefault(current.id,current.liked);
+        homeLikeButton.setText(liked?"♥  좋아요":"♡  좋아요");homeLikeButton.setTextColor(liked?ACCENT:MUTED);
+        // Reserve the action space so a heart press cannot move when its like is saved.
+        homeExportButton.setVisibility(liked?View.VISIBLE:View.INVISIBLE);
+        enabled(homeExportButton,hasRecord && current.liked && !pendingLikes.containsKey(current.id));
+        String id=hasRecord?current.id:null;
+        if(!java.util.Objects.equals(displayedSoundId,id) || homeTitle.length()==0){
+            homeTitle.setText(hasRecord?ChordSampler.describe(current.pitches):"생성한 음 없음");
+            homeSubtitle.setText(hasRecord?date(current.createdAt):"음을 생성하면 여기에 표시됩니다.");
+            homeSound.removeAllViews();if(hasRecord)homeSound.addView(soundTable(current));displayedSoundId=id;
+        }
+    }
+
+    private void enabled(Button button,boolean enabled){button.setEnabled(enabled);button.setAlpha(enabled?1f:.45f);}
 
     private void showHistory(String keepId){
         base("history");header("생성 기록");
@@ -406,8 +586,13 @@ public final class MainActivity extends Activity {
     private void showError(String title,Exception error){if(!destroyed)new AlertDialog.Builder(this).setTitle(title).setMessage(error.getMessage()).setPositiveButton("확인",null).show();}
     @Override public void onBackPressed(){if(!page.equals("home")){stopPlayback();showHome();}else super.onBackPressed();}
     @Override protected void onSaveInstanceState(Bundle out){super.onSaveInstanceState(out);out.putString("page",page);if(current!=null)out.putString("current",current.id);if(pendingExport!=null)try{out.putString("export",pendingExport.toJson().toString());}catch(Exception ignored){}}
-    @Override protected void onStop(){super.onStop();stopPlayback();}
+    @Override protected void onStop(){super.onStop();stopRepeat();stopPlayback();}
     @Override protected void onResume(){super.onResume();if(store!=null && page.equals("home"))showHome();}
-    @Override protected void onDestroy(){destroyed=true;player.close();worker.execute(()->{if(engine!=null)engine.close();});worker.shutdown();super.onDestroy();}
+    @Override protected void onDestroy(){
+        destroyed=true;generationToken.incrementAndGet();stopRepeat();mainHandler.removeCallbacksAndMessages(null);
+        if(store!=null)store.removeChangeListener(historyChanged);
+        player.close();worker.execute(()->{if(engine!=null)engine.close();});worker.shutdown();
+        historyWorker.shutdown();super.onDestroy();
+    }
 
 }

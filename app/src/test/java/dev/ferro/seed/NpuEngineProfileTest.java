@@ -9,6 +9,14 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertThrows;
 
 public final class NpuEngineProfileTest {
+    @Test public void translatedArmAbiCannotLoadTheNativeRuntime() throws Exception {
+        NpuEngine.requireNativeArm64(new String[]{"arm64-v8a", "armeabi-v7a"});
+        assertThrows(IOException.class, () -> NpuEngine.requireNativeArm64(new String[]{"x86_64", "arm64-v8a"}));
+        assertThrows(IOException.class, () -> NpuEngine.requireNativeArm64(new String[]{"x86"}));
+        assertThrows(IOException.class, () -> NpuEngine.requireNativeArm64(new String[0]));
+        assertThrows(IOException.class, () -> NpuEngine.requireNativeArm64(null));
+    }
+
     private static final String QNN = "{\"cat\":\"Node\",\"name\":\"QNN_0_kernel_time\","
             + "\"args\":{\"provider\":\"QNNExecutionProvider\"}}";
 

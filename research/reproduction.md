@@ -4,7 +4,7 @@ Run commands from the repository root. Generated reports, device logs, recording
 
 ## Download and update
 
-Download [FerroMC v0.1.1 APK](https://github.com/studyreadbook4ever/FerroMC/releases/latest/download/FerroMC.apk) for ARM64 Galaxy S24 Ultra. The GitHub Release asset `FerroMC.apk` is the **debug build**, version name `0.1.1` / version code `2`. It is signed with the same existing development key as the earlier installed build, allowing an update that preserves application data. The signing key is excluded from Git. A local rebuild uses that developer's own debug key unless the existing signing key is available; it may therefore be unable to update the published APK.
+Download [FerroMC v0.1.2 APK](https://github.com/studyreadbook4ever/FerroMC/releases/latest/download/FerroMC.apk) for ARM64 Galaxy S24 Ultra. The GitHub Release asset `FerroMC.apk` is the **debug build**, version name `0.1.2` / version code `3`. It is signed with the same existing development key as the earlier installed build, allowing an update that preserves application data. The signing key is excluded from Git. A local rebuild uses that developer's own debug key unless the existing signing key is available; it may therefore be unable to update the published APK.
 
 APK binaries are distributed through GitHub Releases and excluded from the source Git history. The packaged ONNX Runtime and Qualcomm QNN licenses/notices remain in the APK. Source and original model licensing are described in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) and [LICENSE](../LICENSE).
 
@@ -79,7 +79,17 @@ For UI-only testing, use the production ARM64 APK on an emulator that explicitly
 adb -s "$FERROMC_EMULATOR" shell am instrument -w -r -e class dev.ferro.seed.UiFlowTest dev.ferro.seed.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-Repeat for `UiStateTest`, `UiExportTest` and `AudioPlaybackTest`. An emulator without Qualcomm HTP must refuse generation; it is not a substitute for `verify_device.py` or `NpuUiSmokeTest`.
+Repeat for `UiStateTest`, `UiExportTest`, `AudioPlaybackTest` and `AutoRepeatUiTest`. The two `AutoRepeatUiTest` cases intentionally require real HTP initialization to fail and never override the ready flag: they check pressed-note likes, a busy inference queue, rapid taps, late saves across Activity recreation and playback cancellation using isolated history fixtures. An emulator without Qualcomm HTP must refuse generation; x86-first ARM translation is rejected before ORT native initialization to avoid a native-loader crash. It is not a substitute for `verify_device.py` or `NpuUiSmokeTest`.
+
+## Automatic repeat contract (v0.1.2)
+
+A repeat session generates at most 100 new results. After each successful generation and save, the controller requests playback of that same stored result at +1, +2 and +3 seconds, and makes the next generation eligible at +5 seconds. These offsets represent the requested waits of 1 + 1 + 1 + 2 seconds. Playback completion is also a gate: delayed audio must finish before another playback or generation begins. Total elapsed time includes inference, storage, rendering and scheduler delays; a full session is not guaranteed to finish in exactly 500 seconds. Replays do not run either model again, and no 101st result is generated.
+
+Stop, navigation to settings/history/export, Activity stopping in the background, and screen recreation cancel the session. Returning to the app does not resume it. Canceling removes scheduled actions and invalidates outstanding generation/audio callbacks, so a late completion cannot restart the loop. An inference already in progress may finish, but its canceled result is discarded before storage. A durable write that has already begun may finish and remain in history; its late callback cannot schedule playback or another generation. Generation, storage or playback failure stops the session.
+
+Likes remain available during repetition. Updating a like preserves the current playback and repeat state, without rebuilding the entire home view. `FLAG_KEEP_SCREEN_ON` is enabled only while repetition is active and is cleared on every stop/completion path.
+
+Acceptance must cover 100 generations / 300 replay requests, the exact requested offsets, delayed audio completion without overlap, cancellation during each wait and an in-flight generation, failure followed by a stale completion callback, and no automatic restart after backgrounding or recreation. Device tests must exercise the real UI, audio and HTP separately from deterministic controller tests. `RepeatSessionTest` provides deterministic virtual-time coverage. `AutoRepeatTest` requires a physical S24 Ultra and isolates history in cache files while using real HTP and AudioTrack. Its default run covers three cycles and cancellation boundaries. To exercise all 100 cycles naturally, run the installed test APK directly with `-e class dev.ferro.seed.AutoRepeatTest -e ferromc_full_repeat_100 true`; allow up to 12 minutes. It checks 400 pitch passes plus the exact per-note sound-pass count. Raw output is written to app-private `auto-repeat-ui.json`. Do not combine emulator results with actual HTP acceptance. See [validation.md](validation.md) for the exact release's verified scope.
 
 ## Actual Ferro compatibility and DSP comparison
 
